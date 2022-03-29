@@ -12,10 +12,8 @@ __pycache__/
 xdp/libbpf/src/build
 xdp/loader/xdp_stats
 xdp/loader/xdp_loader
-xdp/newip_router/xdp_stats
-xdp/newip_router/xdp_loader
-xdp/newip_router/xdp_prog_user
+xdp/nat64/xdp_stats
+xdp/nat64/xdp_loader
+xdp/nat64/xdp_prog_user
 pcap/
 202*/
-New_IP.egg-info/
-examples/latest
