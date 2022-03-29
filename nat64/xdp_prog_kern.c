@@ -1,0 +1,146 @@
+/* SPDX-License-Identifier: GPL-2.0-only
+   Copyright (c) 2019-2022 @bhaskar792 @rohitmp */
+#include <linux/bpf.h>
+#include <linux/in.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_endian.h>
+
+// The parsing helper functions from the packet01 lesson have moved here
+#include "../common/parsing_helpers.h"
+#include "../common/rewrite_helpers.h"
+
+/* Defines xdp_stats_map */
+#include "../common/xdp_stats_kern_user.h"
+#include "../common/xdp_stats_kern.h"
+
+#include <stdio.h>
+
+#ifndef AF_INET
+#define AF_INET 1
+#endif
+
+#ifndef AF_INET6
+#define AF_INET6 6
+#endif
+
+
+#ifndef memcpy
+#define memcpy(dest, src, n) __builtin_memcpy((dest), (src), (n))
+#endif
+
+struct bpf_map_def SEC("maps") static_redirect_8b = {
+	.type = BPF_MAP_TYPE_HASH,
+	.key_size = sizeof(__u8),
+	.value_size = sizeof(__u32),
+	.max_entries = 256,
+};
+struct bpf_map_def SEC("maps") tx_port = {
+	.type = BPF_MAP_TYPE_DEVMAP,
+	.key_size = sizeof(int),
+	.value_size = sizeof(int),
+	.max_entries = 256,
+};
+
+#define IPV6_FLOWINFO_MASK bpf_htonl(0x0FFFFFFF)
+#define IPV4_SRC_ADDRESS bpf_htonl(0x0a000201) // 10.0.2.1
+
+SEC("v6_side")
+int xdp_router_func(struct xdp_md *ctx)
+{
+	void *data_end = (void *)(long)ctx->data_end;
+	void *data = (void *)(long)ctx->data;
+	
+	struct ethhdr *eth = data;
+	struct iphdr *iph;
+	struct ipv6hdr *ip6h;
+	__u32 dst_v4;
+
+	struct ethhdr eth_cpy;
+	__u16 h_proto;
+	__u64 nh_off;
+	int rc;
+	struct bpf_fib_lookup fib_params = {};
+	int action = XDP_PASS;
+	struct iphdr dst_hdr = {
+		.version = 4,
+                .ihl = 5,
+                .frag_off = bpf_htons(1<<14),
+        };
+
+	nh_off = sizeof(*eth);
+	if (data + nh_off > data_end)
+	{
+		action = XDP_DROP;
+		goto out;
+	}
+
+	h_proto = eth->h_proto;
+	
+	if (h_proto == bpf_htons(ETH_P_IPV6))
+	{
+		bpf_printk("IPv6 packet");
+		
+		__builtin_memcpy(&eth_cpy, eth, sizeof(eth_cpy));
+		ip6h = data + nh_off;
+
+		if (ip6h + 1 > data_end) {
+			action = XDP_DROP;
+			goto out;
+		}
+		dst_v4 = ip6h->daddr.s6_addr32[3];
+		dst_hdr.daddr = dst_v4;
+        dst_hdr.saddr = IPV4_SRC_ADDRESS; // 10.0.2.1
+        dst_hdr.protocol = ip6h->nexthdr;
+        dst_hdr.ttl = ip6h->hop_limit;
+        dst_hdr.tos = ip6h->priority << 4 | (ip6h->flow_lbl[0] >> 4);
+        dst_hdr.tot_len = bpf_htons(bpf_ntohs(ip6h->payload_len) + sizeof(dst_hdr));
+
+
+		if (bpf_xdp_adjust_head(ctx, (int)sizeof(*ip6h) - (int)sizeof(&dst_hdr)))
+			return -1;
+
+		eth = (void *)(long)ctx->data;
+		data_end = (void *)(long)ctx->data_end;
+		if (eth + 1 > data_end)
+			return -1;
+
+		__builtin_memcpy(eth, &eth_cpy, sizeof(*eth));
+		eth->h_proto = bpf_htons(ETH_P_IP);
+		iph = (void *)(eth + sizeof(*eth) +1);
+
+		if (iph + 1 > data_end) {
+			return -1;
+		}
+		iph->version = dst_hdr.version;
+		iph->ihl = dst_hdr.ihl;
+        iph->frag_off = dst_hdr.frag_off;
+		iph->daddr = dst_hdr.daddr;
+        iph->saddr = dst_hdr.saddr; // 10.0.2.1
+        iph->protocol = dst_hdr.protocol;
+        iph->ttl = dst_hdr.ttl;
+        iph->tos = dst_hdr.tos;
+        iph->tot_len = dst_hdr.tot_len;
+
+		fib_params.family = AF_INET;
+		fib_params.ipv4_dst = dst_v4;
+		fib_params.ifindex = ctx->ingress_ifindex;
+
+		rc = bpf_fib_lookup(ctx, &fib_params, sizeof(fib_params), 0);
+		if (rc == BPF_FIB_LKUP_RET_SUCCESS)
+		{
+			memcpy(eth->h_dest, fib_params.dmac, ETH_ALEN);
+			memcpy(eth->h_source, fib_params.smac, ETH_ALEN);
+			action = bpf_redirect_map(&tx_port, fib_params.ifindex, 0);
+		}
+	}
+out:
+		return xdp_stats_record_action(ctx, action);
+}
+
+SEC("xdp_pass")
+int xdp_pass_func(struct xdp_md *ctx)
+{
+	return XDP_PASS;
+}
+
+char _license[] SEC("license") = "GPL";
