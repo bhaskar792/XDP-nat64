@@ -9,11 +9,11 @@ __pycache__/
 *.pcap
 *.json
 *.txt
-xdp/libbpf/src/build
-xdp/loader/xdp_stats
-xdp/loader/xdp_loader
-xdp/nat64/xdp_stats
-xdp/nat64/xdp_loader
-xdp/nat64/xdp_prog_user
+libbpf/src/build
+loader/xdp_stats
+loader/xdp_loader
+nat64/xdp_stats
+nat64/xdp_loader
+nat64/xdp_prog_user
 pcap/
 202*/
